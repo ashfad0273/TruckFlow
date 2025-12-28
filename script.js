@@ -1,19 +1,18 @@
 /**
  * TruckFlow - Trucking Logistics Dashboard
- * Complete JavaScript with Partners, Locations, and Entry Management
- * Version 2.0
+ * Complete JavaScript with Partners, Locations, Entry Management, and Edit Functionality
+ * Version 2.1 - Fixed and Complete
  */
 
 // ============================================
 // CONFIGURATION
 // ============================================
 
-const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbxZdBX6-d1oIiq8nUM5HECHOiojHnpyK-ODniCt9amippNE-02Vy9BkvbQrF3ip3rt8-A/exec'; // Replace with your deployed URL
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbxZdBX6-d1oIiq8nUM5HECHOiojHnpyK-ODniCt9amippNE-02Vy9BkvbQrF3ip3rt8-A/exec';
 
 const AppState = {
     currentFilter: 'today',
     customDateRange: { from: null, to: null },
-    chart: null,
     transactions: [],
     partners: [],
     locations: [],
@@ -22,7 +21,8 @@ const AppState = {
     isLoading: false,
     currentCustomPartnerRow: null,
     currentCustomLocationRow: null,
-    currentCustomLocationType: null
+    currentCustomLocationType: null,
+    editingEntry: null
 };
 
 // ============================================
@@ -42,7 +42,6 @@ $(document).ready(function() {
  * Initialize the application
  */
 function initializeApp() {
-    initializeChart();
     setDefaultDates();
     setActiveFilter($('#filterToday'), 'today');
     loadDashboardData('today');
@@ -69,6 +68,9 @@ function setupEventListeners() {
     
     // Custom partner/location modals
     setupCustomModalEventListeners();
+    
+    // Edit entry modal
+    setupEditEntryEventListeners();
 }
 
 // ============================================
@@ -141,6 +143,12 @@ function setupModalEventListeners() {
                 closeCustomLocationModal();
             } else if (!$('#deleteConfirmModal').hasClass('hidden')) {
                 closeDeleteConfirmModal();
+            } else if (!$('#deletePartnerModal').hasClass('hidden')) {
+                closeDeletePartnerModal();
+            } else if (!$('#deleteLocationModal').hasClass('hidden')) {
+                closeDeleteLocationModal();
+            } else if (!$('#editEntryModal').hasClass('hidden')) {
+                closeEditEntryModal();
             } else if (!$('#partnersModal').hasClass('hidden')) {
                 closePartnersModal();
             } else if (!$('#locationsModal').hasClass('hidden')) {
@@ -920,6 +928,184 @@ function collectEntryData() {
 }
 
 // ============================================
+// EDIT ENTRY MODAL
+// ============================================
+
+function setupEditEntryEventListeners() {
+    // Open edit modal (event delegation)
+    $('#transactionsBody').on('click', '.edit-entry-btn', function() {
+        const rowNumber = $(this).data('row');
+        const rowId = $(this).data('rowid');
+        openEditEntryModal(rowNumber, rowId);
+    });
+    
+    // Close edit modal
+    $('#closeEditModal, #cancelEditBtn').on('click', closeEditEntryModal);
+    
+    // Save edit
+    $('#saveEditBtn').on('click', saveEditEntry);
+}
+
+function openEditEntryModal(rowNumber, rowId) {
+    const $modal = $('#editEntryModal');
+    const $loading = $('#editModalLoading');
+    const $content = $('#editModalContent');
+    
+    // Show modal
+    $modal.removeClass('hidden');
+    $('body').addClass('overflow-hidden');
+    
+    // Show loading
+    $loading.removeClass('hidden');
+    $content.addClass('hidden');
+    
+    // Find the entry in transactions
+    const entry = AppState.transactions.find(tx => 
+        tx.rowNumber == rowNumber || tx.rowId === rowId
+    );
+    
+    if (!entry) {
+        showNotification('Entry not found', 'error');
+        closeEditEntryModal();
+        return;
+    }
+    
+    AppState.editingEntry = entry;
+    
+    // Load partners and locations if needed
+    loadPartnersAndLocations()
+        .then(() => {
+            // Populate form
+            $('#editRowNumber').val(rowNumber || rowId);
+            $('#editDate').val(entry.date);
+            
+            // Populate partner select
+            const $partnerSelect = $('#editPartner');
+            $partnerSelect.empty().append('<option value="">Select partner...</option>');
+            AppState.partners.forEach(partner => {
+                const selected = partner === entry.partner ? 'selected' : '';
+                $partnerSelect.append(`<option value="${escapeHtml(partner)}" ${selected}>${escapeHtml(partner)}</option>`);
+            });
+            // If partner not in list, add it
+            if (entry.partner && !AppState.partners.includes(entry.partner)) {
+                $partnerSelect.append(`<option value="${escapeHtml(entry.partner)}" selected>${escapeHtml(entry.partner)}</option>`);
+            }
+            $partnerSelect.val(entry.partner);
+            
+            // Populate location selects
+            populateEditLocationSelect($('#editFrom'), entry.from);
+            populateEditLocationSelect($('#editTo'), entry.to);
+            
+            // Set other values
+            $('#editAmount').val(entry.amount);
+            $('#editTrucks').val(entry.truckCount);
+            $('#editStatus').val(entry.status);
+            
+            // Hide loading, show content
+            $loading.addClass('hidden');
+            $content.removeClass('hidden');
+        })
+        .catch(error => {
+            console.error('Error loading edit modal:', error);
+            showNotification('Failed to load entry data', 'error');
+            closeEditEntryModal();
+        });
+}
+
+function populateEditLocationSelect($select, currentValue) {
+    $select.empty().append('<option value="">Select location...</option>');
+    
+    AppState.locations.forEach(location => {
+        const selected = location === currentValue ? 'selected' : '';
+        $select.append(`<option value="${escapeHtml(location)}" ${selected}>${escapeHtml(location)}</option>`);
+    });
+    
+    // If current value not in list, add it
+    if (currentValue && !AppState.locations.includes(currentValue)) {
+        $select.append(`<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)}</option>`);
+    }
+    
+    $select.val(currentValue);
+}
+
+function closeEditEntryModal() {
+    $('#editEntryModal').addClass('hidden');
+    $('body').removeClass('overflow-hidden');
+    AppState.editingEntry = null;
+}
+
+function saveEditEntry() {
+    const rowNumber = $('#editRowNumber').val();
+    const date = $('#editDate').val();
+    const partner = $('#editPartner').val();
+    const from = $('#editFrom').val();
+    const to = $('#editTo').val();
+    const amount = parseFloat($('#editAmount').val()) || 0;
+    const truckCount = parseInt($('#editTrucks').val()) || 0;
+    const status = $('#editStatus').val();
+    
+    if (!partner) {
+        showNotification('Please select a partner', 'error');
+        return;
+    }
+    
+    if (!date) {
+        showNotification('Please select a date', 'error');
+        return;
+    }
+    
+    const $btn = $('#saveEditBtn');
+    const originalHtml = $btn.html();
+    
+    $btn.prop('disabled', true).html(`
+        <svg class="animate-spin w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        Updating...
+    `);
+    
+    // Update entry via API
+    updateEntry(rowNumber, {
+        date: date,
+        partner: partner,
+        from: from,
+        to: to,
+        amount: amount,
+        truckCount: truckCount,
+        status: status
+    })
+        .then(result => {
+            if (result.status === 'success') {
+                showNotification('Entry updated successfully!', 'success');
+                closeEditEntryModal();
+                refreshDashboardData();
+            } else {
+                throw new Error(result.message || 'Failed to update entry');
+            }
+        })
+        .catch(error => {
+            console.error('Update error:', error);
+            showNotification('Failed to update entry. Please try again.', 'error');
+        })
+        .finally(() => {
+            $btn.prop('disabled', false).html(originalHtml);
+        });
+}
+
+function updateEntry(rowNumber, entryData) {
+    return fetch(WEB_APP_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({
+            action: 'updateEntry',
+            rowNumber: rowNumber,
+            entry: entryData
+        })
+    }).then(response => response.json());
+}
+
+// ============================================
 // DELETE ENTRY
 // ============================================
 
@@ -953,10 +1139,14 @@ function confirmDeleteEntry() {
     $btn.prop('disabled', true).text('Deleting...');
     
     deleteEntryFromSheet(identifier)
-        .then(() => {
-            showNotification('Entry deleted successfully', 'success');
-            closeDeleteConfirmModal();
-            refreshDashboardData();
+        .then(result => {
+            if (result.status === 'success') {
+                showNotification('Entry deleted successfully', 'success');
+                closeDeleteConfirmModal();
+                refreshDashboardData();
+            } else {
+                throw new Error(result.message || 'Failed to delete');
+            }
         })
         .catch(error => {
             console.error('Delete error:', error);
@@ -1238,16 +1428,12 @@ function updateDashboard(data) {
     if (data.tableData) {
         updateTransactionsTable(data.tableData);
     }
-    
-    if (data.chartData) {
-        updateChartData(data.chartData);
-    }
 }
 
 function updateKPICards(summary) {
     $('#totalTrucks').text(summary.totalTrucks.toLocaleString());
-    $('#revenuePaid').text('$' + formatNumber(summary.totalPaid));
-    $('#outstandingAmount').text('$' + formatNumber(summary.totalOutstanding));
+    $('#revenuePaid').text(formatNumber(summary.totalPaid) + '৳');
+    $('#outstandingAmount').text(formatNumber(summary.totalOutstanding) + '৳');
 }
 
 function updateTransactionsTable(transactions) {
@@ -1296,7 +1482,7 @@ function updateTransactionsTable(transactions) {
         const statusBgClass = isOutstanding ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700';
         const statusDotClass = isOutstanding ? 'bg-rose-500' : 'bg-emerald-500';
         
-        const formattedAmount = tx.formattedAmount || ('$' + formatNumber(tx.amount));
+        const formattedAmount = tx.formattedAmount || (formatNumber(tx.amount) + '৳');
         const formattedDate = tx.formattedDate || formatDisplayDate(tx.date);
         const route = (tx.from && tx.to) ? `${tx.from} → ${tx.to}` : (tx.from || tx.to || '-');
         
@@ -1321,12 +1507,20 @@ function updateTransactionsTable(transactions) {
                     </span>
                 </td>
                 <td class="px-4 py-4 text-center">
-                    <button class="delete-entry-btn p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-colors" 
-                            data-row="${tx.rowNumber}" data-rowid="${escapeHtml(tx.rowId || '')}">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                        </svg>
-                    </button>
+                    <div class="flex items-center justify-center gap-2">
+                        <button class="edit-entry-btn p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" 
+                                data-row="${tx.rowNumber}" data-rowid="${escapeHtml(tx.rowId || '')}">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                            </svg>
+                        </button>
+                        <button class="delete-entry-btn p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-colors" 
+                                data-row="${tx.rowNumber}" data-rowid="${escapeHtml(tx.rowId || '')}">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                        </button>
+                    </div>
                 </td>
             </tr>
         `;
@@ -1336,125 +1530,6 @@ function updateTransactionsTable(transactions) {
     
     const count = transactions.length;
     $('#transactionCount').text(`${count} ${count === 1 ? 'entry' : 'entries'}`);
-}
-
-// ============================================
-// CHART
-// ============================================
-
-function initializeChart() {
-    const ctx = document.getElementById('analyticsChart');
-    if (!ctx) return;
-    
-    const config = {
-        type: 'bar',
-        data: {
-            labels: [],
-            datasets: [
-                {
-                    label: 'Paid Amount',
-                    data: [],
-                    backgroundColor: 'rgba(16, 185, 129, 0.85)',
-                    borderColor: 'rgba(16, 185, 129, 1)',
-                    borderWidth: 1,
-                    borderRadius: 4,
-                    stack: 'amounts',
-                    yAxisID: 'y',
-                    order: 2
-                },
-                {
-                    label: 'Outstanding Amount',
-                    data: [],
-                    backgroundColor: 'rgba(244, 63, 94, 0.85)',
-                    borderColor: 'rgba(244, 63, 94, 1)',
-                    borderWidth: 1,
-                    borderRadius: 4,
-                    stack: 'amounts',
-                    yAxisID: 'y',
-                    order: 3
-                },
-                {
-                    label: 'Truck Count',
-                    data: [],
-                    type: 'line',
-                    borderColor: 'rgba(99, 102, 241, 1)',
-                    backgroundColor: 'rgba(99, 102, 241, 0.1)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4,
-                    pointBackgroundColor: 'rgba(99, 102, 241, 1)',
-                    pointBorderColor: '#ffffff',
-                    pointBorderWidth: 2,
-                    pointRadius: 4,
-                    pointHoverRadius: 6,
-                    yAxisID: 'y1',
-                    order: 1
-                }
-            ]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: { mode: 'index', intersect: false },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: 'rgba(30, 41, 59, 0.95)',
-                    titleColor: '#fff',
-                    bodyColor: '#fff',
-                    padding: 12,
-                    cornerRadius: 8,
-                    callbacks: {
-                        label: function(context) {
-                            let label = context.dataset.label || '';
-                            if (label) label += ': ';
-                            if (context.dataset.label === 'Truck Count') {
-                                label += context.parsed.y + ' trucks';
-                            } else {
-                                label += '$' + context.parsed.y.toLocaleString();
-                            }
-                            return label;
-                        }
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    grid: { display: false },
-                    ticks: { color: '#64748b', font: { size: 10 } }
-                },
-                y: {
-                    type: 'linear',
-                    position: 'left',
-                    stacked: true,
-                    grid: { color: 'rgba(226, 232, 240, 0.6)' },
-                    ticks: {
-                        color: '#64748b',
-                        callback: value => '$' + value.toLocaleString()
-                    }
-                },
-                y1: {
-                    type: 'linear',
-                    position: 'right',
-                    grid: { drawOnChartArea: false },
-                    ticks: { color: '#6366f1' }
-                }
-            }
-        }
-    };
-    
-    AppState.chart = new Chart(ctx, config);
-}
-
-function updateChartData(chartData) {
-    if (!AppState.chart || !chartData) return;
-    
-    AppState.chart.data.labels = chartData.labels || [];
-    AppState.chart.data.datasets[0].data = chartData.paidAmount || [];
-    AppState.chart.data.datasets[1].data = chartData.outstandingAmount || [];
-    AppState.chart.data.datasets[2].data = chartData.truckCount || [];
-    
-    AppState.chart.update('active');
 }
 
 // ============================================
