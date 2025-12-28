@@ -158,6 +158,11 @@ function setupModalEventListeners() {
             }
         }
     });
+
+        // Clear validation error when user changes a field
+    $('#modalBody').on('change input', 'select, input', function() {
+        $(this).removeClass('ring-2 ring-rose-500 border-rose-500');
+    });
 }
 
 /**
@@ -266,9 +271,9 @@ function addEntryRow() {
     // Populate partner select
     populatePartnerSelect($newRow.find('.partner-select'));
     
-    // Populate location selects
-    populateLocationSelect($newRow.find('.from-select'));
-    populateLocationSelect($newRow.find('.to-select'));
+    // Populate location selects (initially no exclusions)
+    populateLocationSelect($newRow.find('.from-select'), null, null);
+    populateLocationSelect($newRow.find('.to-select'), null, null);
     
     // Append row
     $('#modalBody').append($newRow);
@@ -310,16 +315,17 @@ function deleteEntryRow($button) {
 /**
  * Populate partner select dropdown
  */
-function populatePartnerSelect($select) {
+function populatePartnerSelect($select, keepValue = null) {
     $select.empty();
     $select.append('<option value="">Select partner...</option>');
     
-    // Add partners (excluding used ones)
+    // Add partners (excluding used ones, but keep current value)
     AppState.partners.forEach(partner => {
         const isUsed = AppState.usedPartnersToday.includes(partner);
         const isUsedInCurrentRows = isPartnerUsedInCurrentRows(partner);
         
-        if (!isUsed && !isUsedInCurrentRows) {
+        // Include if: not used elsewhere, OR it's the current value of this select
+        if ((!isUsed && !isUsedInCurrentRows) || partner === keepValue) {
             $select.append(`<option value="${escapeHtml(partner)}">${escapeHtml(partner)}</option>`);
         }
     });
@@ -331,13 +337,17 @@ function populatePartnerSelect($select) {
 /**
  * Populate location select dropdown
  */
-function populateLocationSelect($select) {
-    const currentValue = $select.val();
+function populateLocationSelect($select, keepValue = null, excludeValue = null) {
+    const currentValue = keepValue || $select.val();
     
     $select.empty();
     $select.append('<option value="">Select location...</option>');
     
     AppState.locations.forEach(location => {
+        // Skip the excluded value (selected in the other dropdown)
+        if (excludeValue && location === excludeValue) {
+            return;
+        }
         $select.append(`<option value="${escapeHtml(location)}">${escapeHtml(location)}</option>`);
     });
     
@@ -369,11 +379,29 @@ function isPartnerUsedInCurrentRows(partner) {
  */
 function updateAllPartnerSelects() {
     $('#modalBody .partner-select').each(function() {
-        const currentValue = $(this).val();
-        populatePartnerSelect($(this));
+        const $this = $(this);
+        const currentValue = $this.val();
+        populatePartnerSelect($this, currentValue); // Pass current value to keep it
         if (currentValue && currentValue !== '__custom__') {
-            $(this).val(currentValue);
+            $this.val(currentValue);
         }
+    });
+}
+
+function updateAllLocationSelects() {
+    $('#modalBody .entry-row').each(function() {
+        const $row = $(this);
+        const $fromSelect = $row.find('.from-select');
+        const $toSelect = $row.find('.to-select');
+        
+        const fromValue = $fromSelect.val();
+        const toValue = $toSelect.val();
+        
+        // Populate From select, excluding what's selected in To
+        populateLocationSelect($fromSelect, fromValue, toValue);
+        
+        // Populate To select, excluding what's selected in From
+        populateLocationSelect($toSelect, toValue, fromValue);
     });
 }
 
@@ -399,12 +427,28 @@ function handlePartnerChange($select) {
  */
 function handleLocationChange($select) {
     const value = $select.val();
+    const $row = $select.closest('.entry-row');
+    const isFromSelect = $select.hasClass('from-select');
     
     if (value === '__custom__') {
-        AppState.currentCustomLocationRow = $select.closest('.entry-row');
-        AppState.currentCustomLocationType = $select.hasClass('from-select') ? 'from' : 'to';
+        AppState.currentCustomLocationRow = $row;
+        AppState.currentCustomLocationType = isFromSelect ? 'from' : 'to';
         $select.val('');
         openCustomLocationModal();
+        return;
+    }
+    
+    // Update the OTHER location select in the same row to exclude this value
+    if (isFromSelect) {
+        // User changed "From", update "To" dropdown
+        const $toSelect = $row.find('.to-select');
+        const toValue = $toSelect.val();
+        populateLocationSelect($toSelect, toValue, value);
+    } else {
+        // User changed "To", update "From" dropdown
+        const $fromSelect = $row.find('.from-select');
+        const fromValue = $fromSelect.val();
+        populateLocationSelect($fromSelect, fromValue, value);
     }
 }
 
@@ -454,45 +498,79 @@ function confirmCustomPartner() {
     
     // Check if already exists
     if (AppState.partners.includes(name)) {
-        showNotification('Partner already exists', 'warning');
+        showNotification('Partner already exists. Selecting it now.', 'info');
+        applyCustomPartner(name);
+        closeCustomPartnerModal();
         return;
     }
+    
+    // IMPORTANT: Save the row reference BEFORE any async operation or modal close
+    const savedRow = AppState.currentCustomPartnerRow;
     
     if (savePermanent) {
         // Save to sheet
         savePartnerToSheet(name)
-            .then(() => {
-                AppState.partners.push(name);
-                AppState.partners.sort();
-                applyCustomPartner(name);
-                showNotification('Partner added successfully', 'success');
+            .then((result) => {
+                if (result.status === 'success' || result.status === 'exists') {
+                    // Add to AppState
+                    if (!AppState.partners.includes(name)) {
+                        AppState.partners.push(name);
+                        AppState.partners.sort();
+                    }
+                    // Apply using saved reference
+                    applyCustomPartnerToRow(name, savedRow);
+                    showNotification('Partner added successfully', 'success');
+                } else {
+                    throw new Error(result.message || 'Failed to save');
+                }
             })
             .catch(error => {
                 console.error('Error saving partner:', error);
                 // Still add locally for this session
-                applyCustomPartner(name);
+                if (!AppState.partners.includes(name)) {
+                    AppState.partners.push(name);
+                    AppState.partners.sort();
+                }
+                applyCustomPartnerToRow(name, savedRow);
+                showNotification('Partner added for this session', 'warning');
             });
     } else {
-        // Just use for this entry
-        applyCustomPartner(name);
+        // Just use for this entry (add temporarily to AppState)
+        if (!AppState.partners.includes(name)) {
+            AppState.partners.push(name);
+            AppState.partners.sort();
+        }
+        applyCustomPartnerToRow(name, savedRow);
+        showNotification('Partner added for this entry', 'info');
     }
     
+    // Close modal immediately (we already saved the row reference)
     closeCustomPartnerModal();
 }
 
 function applyCustomPartner(name) {
-    if (AppState.currentCustomPartnerRow) {
-        const $select = AppState.currentCustomPartnerRow.find('.partner-select');
-        
-        // Add option if not exists
-        if ($select.find(`option[value="${name}"]`).length === 0) {
-            $select.find('option[value="__custom__"]').before(
-                `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`
-            );
-        }
-        
-        $select.val(name);
-        updateAllPartnerSelects();
+    // Add to AppState if not already there
+    if (!AppState.partners.includes(name)) {
+        AppState.partners.push(name);
+        AppState.partners.sort();
+    }
+    
+    // Refresh all partner selects
+    updateAllPartnerSelects();
+    
+    // Set value on current row if reference exists
+    if (AppState.currentCustomPartnerRow && AppState.currentCustomPartnerRow.length) {
+        AppState.currentCustomPartnerRow.find('.partner-select').val(name);
+    }
+}
+
+function applyCustomPartnerToRow(name, $row) {
+    // Refresh all partner selects with updated list
+    updateAllPartnerSelects();
+    
+    // Set the value on the specific row's select
+    if ($row && $row.length) {
+        $row.find('.partner-select').val(name);
     }
 }
 
@@ -518,45 +596,100 @@ function confirmCustomLocation() {
         return;
     }
     
+    // Check if already exists
     if (AppState.locations.includes(name)) {
-        showNotification('Location already exists', 'warning');
+        showNotification('Location already exists. Selecting it now.', 'info');
+        applyCustomLocation(name);
+        closeCustomLocationModal();
         return;
     }
     
+    // IMPORTANT: Save references BEFORE any async operation or modal close
+    const savedRow = AppState.currentCustomLocationRow;
+    const savedType = AppState.currentCustomLocationType;
+    
     if (savePermanent) {
         saveLocationToSheet(name)
-            .then(() => {
-                AppState.locations.push(name);
-                AppState.locations.sort();
-                applyCustomLocation(name);
-                showNotification('Location added successfully', 'success');
+            .then((result) => {
+                if (result.status === 'success' || result.status === 'exists') {
+                    // Add to AppState
+                    if (!AppState.locations.includes(name)) {
+                        AppState.locations.push(name);
+                        AppState.locations.sort();
+                    }
+                    // Apply using saved references
+                    applyCustomLocationToRow(name, savedRow, savedType);
+                    showNotification('Location added successfully', 'success');
+                } else {
+                    throw new Error(result.message || 'Failed to save');
+                }
             })
             .catch(error => {
                 console.error('Error saving location:', error);
-                applyCustomLocation(name);
+                // Still add locally for this session
+                if (!AppState.locations.includes(name)) {
+                    AppState.locations.push(name);
+                    AppState.locations.sort();
+                }
+                applyCustomLocationToRow(name, savedRow, savedType);
+                showNotification('Location added for this session', 'warning');
             });
     } else {
-        applyCustomLocation(name);
+        // Just use for this entry (add temporarily to AppState)
+        if (!AppState.locations.includes(name)) {
+            AppState.locations.push(name);
+            AppState.locations.sort();
+        }
+        applyCustomLocationToRow(name, savedRow, savedType);
+        showNotification('Location added for this entry', 'info');
     }
     
+    // Close modal immediately (we already saved the references)
     closeCustomLocationModal();
 }
 
+function applyCustomLocationToRow(name, $row, locationType) {
+    // Refresh all location selects with updated list
+    updateAllLocationSelects();
+    
+    // Set the value on the specific row's select
+    if ($row && $row.length && locationType) {
+        const isFrom = locationType === 'from';
+        const $targetSelect = $row.find(isFrom ? '.from-select' : '.to-select');
+        const $otherSelect = $row.find(isFrom ? '.to-select' : '.from-select');
+        
+        // Set value on target select
+        $targetSelect.val(name);
+        
+        // Update the other select to exclude this new value
+        const otherValue = $otherSelect.val();
+        populateLocationSelect($otherSelect, otherValue, name);
+    }
+}
+
 function applyCustomLocation(name) {
-    if (AppState.currentCustomLocationRow && AppState.currentCustomLocationType) {
-        const selectClass = AppState.currentCustomLocationType === 'from' ? '.from-select' : '.to-select';
-        const $select = AppState.currentCustomLocationRow.find(selectClass);
+    // Add to AppState if not already there
+    if (!AppState.locations.includes(name)) {
+        AppState.locations.push(name);
+        AppState.locations.sort();
+    }
+    
+    // Refresh all location selects
+    updateAllLocationSelects();
+    
+    // Set value on current row if references exist
+    if (AppState.currentCustomLocationRow && AppState.currentCustomLocationRow.length && AppState.currentCustomLocationType) {
+        const $row = AppState.currentCustomLocationRow;
+        const isFrom = AppState.currentCustomLocationType === 'from';
+        const $targetSelect = $row.find(isFrom ? '.from-select' : '.to-select');
+        const $otherSelect = $row.find(isFrom ? '.to-select' : '.from-select');
         
-        // Add to all location selects
-        $('#modalBody .location-select').each(function() {
-            if ($(this).find(`option[value="${name}"]`).length === 0) {
-                $(this).find('option[value="__custom__"]').before(
-                    `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`
-                );
-            }
-        });
+        // Set the value
+        $targetSelect.val(name);
         
-        $select.val(name);
+        // Update other select to exclude this value
+        const otherValue = $otherSelect.val();
+        populateLocationSelect($otherSelect, otherValue, name);
     }
 }
 
@@ -858,7 +991,126 @@ function setupEntryEventListeners() {
     $('#saveEntries').on('click', saveEntries);
 }
 
+/**
+ * Validate all entry rows before saving
+ * @returns {Object} { isValid: boolean, message: string, firstInvalidField: jQuery|null }
+ */
+function validateEntries() {
+    let isValid = true;
+    let message = '';
+    let firstInvalidField = null;
+    
+    const $rows = $('#modalBody .entry-row');
+    
+    if ($rows.length === 0) {
+        return {
+            isValid: false,
+            message: 'Please add at least one entry',
+            firstInvalidField: null
+        };
+    }
+    
+    // Clear any previous validation highlights
+    $rows.find('select, input').removeClass('ring-2 ring-rose-500 border-rose-500');
+    
+    $rows.each(function(index) {
+        const $row = $(this);
+        const rowNum = index + 1;
+        
+        // Get field values
+        const partner = $row.find('[name="entryPartner"]').val();
+        const from = $row.find('[name="entryFrom"]').val();
+        const to = $row.find('[name="entryTo"]').val();
+        const amount = $row.find('[name="entryAmount"]').val();
+        const trucks = $row.find('[name="entryTrucks"]').val();
+        
+        // Validate Partner
+        if (!partner || partner === '' || partner === '__custom__') {
+            if (isValid) {
+                isValid = false;
+                message = `Row ${rowNum}: Please select a partner`;
+                firstInvalidField = $row.find('[name="entryPartner"]');
+            }
+            $row.find('[name="entryPartner"]').addClass('ring-2 ring-rose-500 border-rose-500');
+        }
+        
+        // Validate From Location
+        if (!from || from === '' || from === '__custom__') {
+            if (isValid) {
+                isValid = false;
+                message = `Row ${rowNum}: Please select a "From" location`;
+                firstInvalidField = $row.find('[name="entryFrom"]');
+            }
+            $row.find('[name="entryFrom"]').addClass('ring-2 ring-rose-500 border-rose-500');
+        }
+        
+        // Validate To Location
+        if (!to || to === '' || to === '__custom__') {
+            if (isValid) {
+                isValid = false;
+                message = `Row ${rowNum}: Please select a "To" location`;
+                firstInvalidField = $row.find('[name="entryTo"]');
+            }
+            $row.find('[name="entryTo"]').addClass('ring-2 ring-rose-500 border-rose-500');
+        }
+        
+        // Validate From and To are different
+        if (from && to && from === to) {
+            if (isValid) {
+                isValid = false;
+                message = `Row ${rowNum}: "From" and "To" locations cannot be the same`;
+                firstInvalidField = $row.find('[name="entryTo"]');
+            }
+            $row.find('[name="entryFrom"], [name="entryTo"]').addClass('ring-2 ring-rose-500 border-rose-500');
+        }
+        
+        // Validate Amount (must be a positive number)
+        if (!amount || amount === '' || parseFloat(amount) <= 0) {
+            if (isValid) {
+                isValid = false;
+                message = `Row ${rowNum}: Please enter a valid amount greater than 0`;
+                firstInvalidField = $row.find('[name="entryAmount"]');
+            }
+            $row.find('[name="entryAmount"]').addClass('ring-2 ring-rose-500 border-rose-500');
+        }
+        
+        // Validate Trucks (must be a positive number)
+        if (!trucks || trucks === '' || parseInt(trucks) <= 0) {
+            if (isValid) {
+                isValid = false;
+                message = `Row ${rowNum}: Please enter a valid truck count greater than 0`;
+                firstInvalidField = $row.find('[name="entryTrucks"]');
+            }
+            $row.find('[name="entryTrucks"]').addClass('ring-2 ring-rose-500 border-rose-500');
+        }
+    });
+    
+    return {
+        isValid: isValid,
+        message: message,
+        firstInvalidField: firstInvalidField
+    };
+}
+
 function saveEntries() {
+    // Validate entries first
+    const validation = validateEntries();
+    
+    if (!validation.isValid) {
+        showNotification(validation.message, 'error');
+        
+        // Focus the first invalid field
+        if (validation.firstInvalidField) {
+            validation.firstInvalidField.focus();
+            
+            // Remove all highlights after 3 seconds
+            setTimeout(() => {
+                $('#modalBody .entry-row').find('select, input').removeClass('ring-2 ring-rose-500 border-rose-500');
+            }, 3000);
+        }
+        return;
+    }
+    
     const entries = collectEntryData();
     
     if (entries.length === 0) {
