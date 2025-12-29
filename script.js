@@ -1684,8 +1684,8 @@ function updateDashboard(data) {
 
 function updateKPICards(summary) {
     $('#totalTrucks').text(summary.totalTrucks.toLocaleString());
-    $('#revenuePaid').text(formatNumber(summary.totalPaid) + '৳');
-    $('#outstandingAmount').text(formatNumber(summary.totalOutstanding) + '৳');
+    $('#revenuePaid').text(formatNumber(summary.totalPaid) + 'TK');
+    $('#outstandingAmount').text(formatNumber(summary.totalOutstanding) + 'TK');
 }
 
 function updateTransactionsTable(transactions) {
@@ -1734,7 +1734,7 @@ function updateTransactionsTable(transactions) {
         const statusBgClass = isOutstanding ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700';
         const statusDotClass = isOutstanding ? 'bg-rose-500' : 'bg-emerald-500';
         
-        const formattedAmount = tx.formattedAmount || (formatNumber(tx.amount) + '৳');
+        const formattedAmount = tx.formattedAmount || (formatNumber(tx.amount) + 'TK');
         const formattedDate = tx.formattedDate || formatDisplayDate(tx.date);
         const route = (tx.from && tx.to) ? `${tx.from} → ${tx.to}` : (tx.from || tx.to || '-');
         
